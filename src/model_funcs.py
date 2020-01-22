@@ -75,7 +75,7 @@ def __generate_cv_metrics(clf, X_cv, y_cv, param_dict):
     y_cv_test_list = []
     y_cv_test_pred_prob_list = []
 
-    kfold_obj = KFold(n_splits=5, shuffle=True)
+    kfold_obj = KFold(n_splits=5, shuffle=True, random_state=110)
 
     for curr_train_iloc_list, curr_test_iloc_list in kfold_obj.split(X=X_cv, y=y_cv):
 
@@ -209,3 +209,70 @@ def run_mlflow_exp_V10(X_cv, X_test, y_cv, y_test, curr_params_dict, experiment_
 
         # Log the feature list artifact
         mlflow.log_artifact(confusion_output_path)
+
+def run_experiment_without_mlflow(X_cv, X_test, y_cv, y_test, curr_params_dict):
+    # Define the model
+    log_regr_clf = LogisticRegression(penalty='l1',
+                                      C=curr_params_dict['C'],
+                                      class_weight=curr_params_dict['class_weight'],
+                                      random_state=110,
+                                      solver=curr_params_dict['solver'],
+                                      max_iter=curr_params_dict['max_iter'],
+                                      verbose=0,
+                                      n_jobs=None,
+                                      l1_ratio=None)
+
+    # Remove the lowest q quantile of genes based on their CoV
+    X_cv, X_test = __remove_lowest_quantile_of_genes_based_on_cov(X_train=X_cv,
+                                                                  X_test=X_test,
+                                                                  q=curr_params_dict['lower_quantile_removed_CoV'])
+
+    # Run SMOTE on the full X_cv,y_cv data
+    if curr_params_dict['use_smote']:
+        X_cv, y_cv = __smote_oversample(X_cv, y_cv)
+
+    # Train the model on the full CV data
+    log_regr_clf.fit(X_cv, y_cv)
+
+    y_test_pred = log_regr_clf.predict(X_test)
+
+    results_dict = {}
+
+    # Log parameters
+    results_dict["params.log10_C"] = np.log10(curr_params_dict['C'])
+    results_dict["params.log10_max_iter"] = np.log10(curr_params_dict['max_iter'])
+    results_dict["params.solver"] = curr_params_dict['solver']
+    results_dict["params.class_weight"] = curr_params_dict['class_weight']
+    results_dict["params.lower_quantile_removed_CoV"] = curr_params_dict['lower_quantile_removed_CoV']
+    results_dict["params.use_smote"] = curr_params_dict['use_smote']
+
+    # Log test metrics
+    results_dict["train_accuracy"] = __calculate_model_accuracy(log_regr_clf, X_cv, y_cv)
+    results_dict["test_accuracy"] = __calculate_model_accuracy(log_regr_clf, X_test, y_test)
+    results_dict["train_auc"] = skl_metrics.roc_auc_score(y_true=y_cv,
+                                                          y_score=log_regr_clf.predict_proba(X_cv)[:, 1])
+    results_dict["test_auc"] = skl_metrics.roc_auc_score(y_true=y_test,
+                                                         y_score=log_regr_clf.predict_proba(X_test)[:, 1])
+
+    # Sensitivity/specificity
+    test_sensitivity, \
+    test_specificity = __calculate_sens_and_spec(y_true=y_test, y_pred=y_test_pred)
+
+    results_dict["test_sensitivity"] = test_sensitivity
+    results_dict["test_specificity"] = test_specificity
+
+    # Log count of non-zero features
+    results_dict["count_non_zero_features"] = np.sum(log_regr_clf.coef_[0] != 0)
+
+    # Write the feature list to file
+    results_dict['feature_list'] = X_cv.columns[(log_regr_clf.coef_[0] != 0)].tolist()
+
+    # Confusion matrix
+    confusion_matrix = skl_metrics.confusion_matrix(y_true=y_test, y_pred=y_test_pred)
+
+    # Output a dataframe with the confusion matrix results
+    results_dict['confusion_matrix'] = pd.DataFrame(confusion_matrix,
+                                                    columns=['0_pred','1_pred'],
+                                                    index=['0_actual','1_actual'])
+
+    return results_dict
